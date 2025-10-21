@@ -12,35 +12,22 @@
 
 # Default intermediate artifacts directory is in /root/work/nanochat-cache
 export OMP_NUM_THREADS=1
-export NANOCHAT_BASE_DIR="/root/work/nanochat-cache"
+export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
 mkdir -p $NANOCHAT_BASE_DIR
 
 # -----------------------------------------------------------------------------
-# for some reason, getting uv+venv to work with system site packages is a challenge
-# need system site packages if we use nvidia-pytorch docker images.
-# workaround for now: disable the usage of uv and just venv
 # Python venv setup with uv
 
-# # install uv (if not already installed)
-# command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
-# source $HOME/.local/bin/env
-# # create a .venv local virtual environment (if it doesn't exist)
-# [ -d ".venv" ] || uv venv
-# # install the repo dependencies
-# uv sync
-
-python -m venv --system-site-packages .venv
+# install uv (if not already installed)
+command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+# create a .venv local virtual environment (if it doesn't exist)
+[ -d ".venv" ] || uv venv
+# install the repo dependencies
+uv sync
 # activate venv so that `python` uses the project's venv instead of system python
 source .venv/bin/activate
 
-# -----------------------------------------------------------------------------
-# Install Rust / Cargo
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-python -m pip install -U maturin
-
-# this must be after the above
-python -m pip install --no-build-isolation -e .
 # -----------------------------------------------------------------------------
 # wandb setup
 # If you wish to use wandb for logging (it's nice!, recommended).
@@ -61,8 +48,13 @@ python -m nanochat.report reset
 
 # -----------------------------------------------------------------------------
 # Tokenizer
+
+# Install Rust / Cargo
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+
 # Build the rustbpe Tokenizer
-python -m maturin develop --release --manifest-path rustbpe/Cargo.toml
+uv run maturin develop --release --manifest-path rustbpe/Cargo.toml
 
 # Download the first ~2B characters of pretraining dataset
 # look at dev/repackage_data_reference.py for details on how this data was prepared
