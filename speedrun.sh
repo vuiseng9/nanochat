@@ -29,10 +29,10 @@ mkdir -p $NANOCHAT_BASE_DIR
 # # install the repo dependencies
 # uv sync
 
-python -m venv --system-site-packages .venv
+# python -m venv --system-site-packages .venv
 # activate venv so that `python` uses the project's venv instead of system python
-source .venv/bin/activate
-
+# source .venv/bin/activate
+$ source /opt/venv/bin/activate
 # -----------------------------------------------------------------------------
 # Install Rust / Cargo
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y

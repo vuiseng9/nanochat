@@ -14,9 +14,13 @@
                 "OMP_NUM_THREADS": "1",
                 "NANOCHAT_BASE_DIR": "/root/work/nanochat-cache",
                 // "CUBLASLT_LOG_MASK": "31",
-                "CUBLASLT_LOG_LEVEL": "2",
-                "CUBLASLT_LOG_FILE": "./cublaslt_log.txt"
+                // "CUBLASLT_LOG_LEVEL": "2",
+                // "CUBLASLT_LOG_FILE": "./cublaslt_log.txt"
+                "HIPBLASLT_LOG_LEVEL": "2",
+                // "HIPBLASLT_LOG_MASK": "31",
+                "HIPBLASLT_LOG_FILE": "./hipblaslt_log.txt"
             },
+            "subProcess": false,
             "cwd": "${workspaceFolder}",
             "module": "torch.distributed.run",
             "args": [
