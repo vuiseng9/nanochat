@@ -27,6 +27,27 @@ from nanochat.checkpoint_manager import save_checkpoint
 from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 from scripts.base_eval import evaluate_model
+
+try:
+    import transformer_engine.common.recipe as te_recipe
+    from transformer_engine.pytorch import fp8_autocast
+    HAS_TE = True
+except ImportError as e:
+    print0(f"transformer_engine is not installed: {e}")
+    HAS_TE = False
+
+recipe_map = {}
+if HAS_TE and te_recipe is not None:
+    # Use getattr to be forward/backward compatible with TE versions
+    maybe_f8 = getattr(te_recipe, "Float8CurrentScaling", None)
+    if maybe_f8 is not None:
+        recipe_map["fp8"] = maybe_f8
+    maybe_mx = getattr(te_recipe, "MXFP8BlockScaling", None)
+    if maybe_mx is not None:
+        recipe_map["mxfp8"] = maybe_mx
+
+PRECISIONS = tuple(recipe_map.keys()) + ("bf16",)
+
 print_banner()
 
 # -----------------------------------------------------------------------------
@@ -34,6 +55,7 @@ print_banner()
 run = "dummy" # wandb run name default ("dummy" is special - we won't log to wandb)
 # Runtime
 device_type = "" # cuda|cpu|mps (empty => autodetect good device type default, in order: CUDA > MPS > CPU)
+prec='bf16' # training precision, one of PRECISIONS
 # Model architecture
 depth = 20 # the depth of the Transformer model to train, rest of the kwargs are derived
 max_seq_len = 2048 # max context length
@@ -61,6 +83,7 @@ model_tag = "" # optionally override the model tag for the output checkpoint dir
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open(os.path.join('nanochat', 'configurator.py')).read()) # overrides from command line or config file
 user_config = {k: globals()[k] for k in config_keys} # will be useful for logging
+assert prec in PRECISIONS, f"Unknown precision {prec}, must be one of {PRECISIONS}"
 # -----------------------------------------------------------------------------
 
 # Compute init
@@ -68,6 +91,9 @@ device_type = autodetect_device_type() if device_type == "" else device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
 autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
+recipe = None if prec == 'bf16' else recipe_map[prec]() 
+def get_fp8_context():
+    return fp8_autocast(fp8_recipe=recipe) if prec in recipe_map.keys() else nullcontext()
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
 
@@ -105,7 +131,7 @@ print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {
 model_config_kwargs = dict(sequence_len=max_seq_len, vocab_size=vocab_size, n_layer=num_layers, n_head=num_heads, n_kv_head=num_kv_heads, n_embd=model_dim)
 with torch.device("meta"):
     model_config = GPTConfig(**model_config_kwargs)
-    model = GPT(model_config)
+    model = GPT(model_config, prec=prec)
 model.to_empty(device=device)
 model.init_weights()
 orig_model = model # original, uncompiled model, for saving raw model state_dict
@@ -189,7 +215,8 @@ for step in range(num_iterations + 1):
         val_loader = build_val_loader()
         eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
         with autocast_ctx:
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+            with get_fp8_context():
+                val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
         print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
@@ -207,7 +234,8 @@ for step in range(num_iterations + 1):
     if core_metric_every > 0 and (last_step or (step > 0 and step % core_metric_every == 0)):
         model.eval()
         with autocast_ctx:
-            results = evaluate_model(orig_model, tokenizer, device, max_per_task=core_metric_max_per_task)
+            with get_fp8_context():
+                results = evaluate_model(orig_model, tokenizer, device, max_per_task=core_metric_max_per_task)
         print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
         wandb_run.log({
             "step": step,
@@ -234,7 +262,8 @@ for step in range(num_iterations + 1):
         for prompt in prompts:
             tokens = tokenizer(prompt, prepend="<|bos|>")
             with autocast_ctx:
-                sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
+                with get_fp8_context():
+                    sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
             print0(tokenizer.decode(sample[0]))
         model.train()
 
@@ -267,7 +296,8 @@ for step in range(num_iterations + 1):
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
         with autocast_ctx:
-            loss = model(x, y)
+            with get_fp8_context():
+                loss = model(x, y)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward()
