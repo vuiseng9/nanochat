@@ -1,0 +1,70 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "[torchrun] mid_train",
+            "type": "debugpy",
+            "request": "launch",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "subProcess": false,
+            "env": {
+                "OMP_NUM_THREADS": "1",
+                "NANOCHAT_BASE_DIR": "/root/work/nanochat-cache",
+                // "CUBLASLT_LOG_MASK": "31",
+                // "CUBLASLT_LOG_LEVEL": "2",
+                // "CUBLASLT_LOG_FILE": "./cublaslt_log.txt"
+            },
+            "cwd": "${workspaceFolder}",
+            "module": "torch.distributed.run",
+            "args": [
+                "--standalone",
+                "--nproc_per_node", "1",
+                "-m", "scripts.mid_train",
+                // "--",
+                // "--depth=20",
+                // "--prec=fp8", 
+                // "--device_batch_size=16"
+                // "--run=dev",
+            ]
+        },
+        {
+            "name": "[torchrun] base_train",
+            "type": "debugpy",
+            "request": "launch",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "subProcess": false,
+            "env": {
+                "OMP_NUM_THREADS": "1",
+                "NANOCHAT_BASE_DIR": "/root/work/nanochat-cache",
+                // "CUBLASLT_LOG_MASK": "31",
+                // "CUBLASLT_LOG_LEVEL": "2",
+                // "CUBLASLT_LOG_FILE": "./cublaslt_log.txt"
+            },
+            "cwd": "${workspaceFolder}",
+            "module": "torch.distributed.run",
+            "args": [
+                "--standalone",
+                "--nproc_per_node", "1",
+                "-m", "scripts.base_train",
+                "--",
+                "--depth=20",
+                "--prec=fp8", 
+                // "--device_batch_size=16"
+                // "--run=dev",
+            ]
+        },
+        {
+            "name": "Python Debugger: Current File with Arguments",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": "${command:pickArgs}"
+        }
+    ]
+}

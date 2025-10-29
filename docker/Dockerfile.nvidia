@@ -1,0 +1,37 @@
+FROM nvcr.io/nvidia/pytorch:25.09-py3
+SHELL ["/bin/bash", "-lc"]
+USER root
+
+ARG REPO=https://github.com/vuiseng9/nanochat
+ARG BRANCH=low-precision
+
+# --- Get code -----------------------------------------------------------------
+WORKDIR /workspace
+RUN git clone $REPO && cd nanochat && git checkout $BRANCH
+WORKDIR /workspace/nanochat
+
+# --- Project-local venv so maturin can see it --------------------------------
+RUN python -m venv --system-site-packages .venv
+ENV VIRTUAL_ENV="/workspace/nanochat/.venv"
+ENV PATH="$VIRTUAL_ENV/bin:/root/.cargo/bin:$PATH"
+# Make interactive/login shells (docker run -it bash) pick it up too
+RUN printf 'export VIRTUAL_ENV="/workspace/nanochat/.venv"\nexport PATH="$VIRTUAL_ENV/bin:$PATH"\n' > /etc/profile.d/venv.sh
+
+# --- Rust toolchain -----------------------------------------------------------
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | bash -s -- -y
+# Also expose cargo for interactive shells
+RUN printf 'export PATH="$HOME/.cargo/bin:$PATH"\n' > /etc/profile.d/cargo.sh
+
+# --- Install (uses venv python/pip) -------------------------------------------
+RUN pip install -U pip maturin \
+ && pip install --no-build-isolation -e . \
+ && python -m maturin develop --release --manifest-path rustbpe/Cargo.toml
+
+RUN printf 'export OMP_NUM_THREADS=1\n' >> /root/.bashrc
+RUN printf 'export NANOCHAT_BASE_DIR=/root/work/nanochat-cache\n' >> /root/.bashrc
+
+# Optional: stay in repo; interactive shells get venv/cargo automatically
+WORKDIR /workspace/nanochat
+CMD ["/bin/bash"]
+
+
