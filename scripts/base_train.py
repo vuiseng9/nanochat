@@ -136,9 +136,9 @@ with torch.device("meta"):
     model_config = GPTConfig(**model_config_kwargs)
     model = GPT(model_config, prec=prec)
 model.to_empty(device=device)
-model.init_weights()
+# model.init_weights()
 orig_model = model # original, uncompiled model, for saving raw model state_dict
-model = torch.compile(model, dynamic=False) # TODO: dynamic True/False think through
+# model = torch.compile(model, dynamic=False) # TODO: dynamic True/False think through
 num_params = sum(p.numel() for p in model.parameters())
 print0(f"Number of parameters: {num_params:,}")
 num_flops_per_token = model.estimate_flops()

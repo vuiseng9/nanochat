@@ -38,6 +38,7 @@ class GPTConfig:
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (MQA)
     n_embd: int = 768
+    use_te_fused_module: bool = False # whether to use fused rmsnorm from TE if available
 
 
 def norm(x):
@@ -63,20 +64,41 @@ class CausalSelfAttention(nn.Module):
         self.n_kv_head = config.n_kv_head
         self.n_embd = config.n_embd
         self.head_dim = self.n_embd // self.n_head
+        self.use_te_fused_module = config.use_te_fused_module
         assert self.n_embd % self.n_head == 0
         assert self.n_kv_head <= self.n_head and self.n_head % self.n_kv_head == 0
-        self.c_q = Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
-        self.c_k = Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
-        self.c_v = Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
-        self.c_proj = Linear(self.n_embd, self.n_embd, bias=False)
+
+        if self.use_te_fused_module is True:
+            self.qdim = self.n_head * self.head_dim
+            self.kvdim = self.n_kv_head * self.head_dim
+            self.c_fused_norm_qkv = te.LayerNormLinear(
+                in_features=self.n_embd,
+                out_features=(self.qdim + 2 * self.kvdim),  # Q + K + V
+                normalization="RMSNorm",
+                bias=False)
+            self.c_proj = te.Linear(self.n_head * self.head_dim, self.n_embd, bias=False)
+        else:
+            self.c_q = Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
+            self.c_k = Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+            self.c_v = Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+            self.c_proj = Linear(self.n_embd, self.n_embd, bias=False)
 
     def forward(self, x, cos_sin, kv_cache):
         B, T, C = x.size()
 
-        # Project the input to get queries, keys, and values
-        q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
-        k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
-        v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
+        if self.use_te_fused_module is True:
+            # Fused projection for Q, K, V with RMSNorm
+            qkv = self.c_fused_norm_qkv(x)
+            q, k, v = torch.split(qkv, [self.qdim, self.kvdim, self.kvdim], dim=2)
+            q = q.view(B, T, self.n_head, self.head_dim)
+            k = k.view(B, T, self.n_kv_head, self.head_dim)
+            v = v.view(B, T, self.n_kv_head, self.head_dim)
+        else:
+            x = norm(x)
+            # Project the input to get queries, keys, and values
+            q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
+            k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
+            v = self.c_v(x).view(B, T, self.n_kv_head, self.head_dim)
 
         # Apply Rotary Embeddings to queries and keys to get relative positional encoding
         cos, sin = cos_sin
@@ -120,15 +142,32 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc = Linear(config.n_embd, 4 * config.n_embd, bias=False)
-        self.c_proj = Linear(4 * config.n_embd, config.n_embd, bias=False)
+        if config.use_te_fused_module is True:
+            self.c_fused_norm_fc = te.LayerNormLinear(
+                in_features=config.n_embd,
+                out_features=4 * config.n_embd,
+                normalization="RMSNorm",
+                bias=False,
+            )
+            self.c_proj = te.Linear(4 * config.n_embd, config.n_embd, bias=False)
+            self.forward = self._te_forward
+        else:
+            self.c_fc = Linear(config.n_embd, 4 * config.n_embd, bias=False)
+            self.c_proj = Linear(4 * config.n_embd, config.n_embd, bias=False)
+            self.forward = self._forward
 
-    def forward(self, x):
+    def _forward(self, x):
+        x = norm(x)
         x = self.c_fc(x)
         x = F.relu(x).square()
         x = self.c_proj(x)
         return x
 
+    def _te_forward(self, x):
+        x = self.c_fused_norm_fc(x)
+        x = F.relu(x).square()
+        x = self.c_proj(x)
+        return x
 
 class Block(nn.Module):
     def __init__(self, config, layer_idx):
@@ -137,8 +176,8 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x, cos_sin, kv_cache):
-        x = x + self.attn(norm(x), cos_sin, kv_cache)
-        x = x + self.mlp(norm(x))
+        x = x + self.attn(x, cos_sin, kv_cache)
+        x = x + self.mlp(x)
         return x
 
 
@@ -224,10 +263,23 @@ class GPT(nn.Module):
         model_dim = self.config.n_embd
         ddp, rank, local_rank, world_size = get_dist_info()
         # Separate out all parameters into 3 groups (matrix, embedding, lm_head)
-        matrix_params = list(self.transformer.h.parameters())
+        matrix_params = []
+        frozen_params = []
+        if self.config.use_te_fused_module is True:
+            # TE module only supports learnable layer norm weights, so we brute force to set them to 1.0 and no gradient update
+            for n, p in self.transformer.h.named_parameters():
+                if 'layer_norm_weight' in n:
+                    with torch.no_grad():
+                        p.fill_(1.0)
+                    p.requires_grad_(False)
+                    frozen_params.append(p)
+                    continue
+                matrix_params.append(p)
+        else:
+            matrix_params = list(self.transformer.h.parameters())
         embedding_params = list(self.transformer.wte.parameters())
         lm_head_params = list(self.lm_head.parameters())
-        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params)
+        assert len(list(self.parameters())) == len(matrix_params) + len(embedding_params) + len(lm_head_params) + len(frozen_params)
         # Create the AdamW optimizer for the embedding and lm_head
         # Scale the LR for the AdamW parameters by ∝1/√dmodel (having tuned the LRs for 768 dim model)
         dmodel_lr_scale = (model_dim / 768) ** -0.5
